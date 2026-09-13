@@ -1169,6 +1169,11 @@ class Print;
         unsigned int m_layer_id;
         CpColor m_cp_color;
         SeamsDetector m_seams_detector;
+        // Declared before m_options_z_corrector, which binds a reference to it in its
+        // constructor: member init order follows declaration order regardless of the
+        // constructor's init-list order, so m_result must be declared first or GCC's
+        // -Wuninitialized flags the not-yet-constructed reference target as an error.
+        GCodeProcessorResult m_result;
         OptionsZCorrector m_options_z_corrector;
         size_t m_last_default_color_id;
         bool m_detect_layer_based_on_tag {false};
@@ -1202,7 +1207,6 @@ class Print;
 
         Print* m_print{ nullptr };
 
-        GCodeProcessorResult m_result;
         static unsigned int s_result_id;
 
     public:
