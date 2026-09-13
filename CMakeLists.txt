@@ -624,6 +624,14 @@ if ((NOT MSVC OR IS_CLANG_CL) AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR 
 
             # template-id-cdtor is a GCC 14+ warning in the bundled Clipper2 headers.
             template-id-cdtor
+
+            # deprecated-declarations: TextureToColor/Repair.hpp calls CGAL's
+            # triangulate_hole() overload that takes a halfedge_descriptor directly,
+            # deprecated in favor of one taking a range of halfedges. GCC attributes
+            # the warning to the call site rather than CGAL's own (system-included,
+            # otherwise-exempt) header, so it isn't caught by the SYSTEM include
+            # exemption above. Clang already has the whole category disabled.
+            deprecated-declarations
         )
     endif ()
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
