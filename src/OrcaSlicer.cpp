@@ -1796,7 +1796,7 @@ int CLI::run(int argc, char **argv)
                         old_printable_width = (int)(old_printable_area[2].x() - old_printable_area[0].x());
                         old_printable_depth = (int)(old_printable_area[2].y() - old_printable_area[0].y());
                     }
-                    old_printable_height = (int)(config.opt_float("printable_height"));
+                    old_printable_height = (int)(config.option<ConfigOptionFloat>("printable_height", true)->value);
 
                     if (config.option<ConfigOptionFloat>("extruder_clearance_height_to_rod"))
                         old_height_to_rod = config.opt_float("extruder_clearance_height_to_rod");
