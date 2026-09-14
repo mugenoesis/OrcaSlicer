@@ -632,6 +632,17 @@ if ((NOT MSVC OR IS_CLANG_CL) AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR 
             # otherwise-exempt) header, so it isn't caught by the SYSTEM include
             # exemption above. Clang already has the whole category disabled.
             deprecated-declarations
+
+            # attributes: pybind11 wraps its internal `detail` namespace in
+            # `#pragma GCC visibility push(hidden)` by design, to keep ABI-internal
+            # types out of a module's exported symbol table. A default-visibility class
+            # that PIMPLs one of those hidden types behind a unique_ptr member (safe --
+            # it's only ever a pointer, never part of the outer class's own ABI) trips
+            # -Wattributes at both the point of use and, for the same reason, inside
+            # pybind11's own error_already_set. Our PythonInterpreter follows the same
+            # pattern deliberately (deps_src/pybind11 is a plain -I include, not
+            # -isystem, so it isn't caught by the SYSTEM exemption above either).
+            attributes
         )
     endif ()
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
