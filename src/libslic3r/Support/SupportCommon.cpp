@@ -270,7 +270,9 @@ SupportGeneratorLayersPtr generate_raft_base(
         // The object does not have a raft.
         // Calculate the area covered by the brim.
         const BrimType brim_type       = object.config().brim_type;
-        const bool     brim_outer      = brim_type == btOuterOnly || brim_type == btOuterAndInner;
+        // btLeadingEdgeOnly only means anything on a belt printer, where this code path
+        // does not run; elsewhere it degrades to an outer brim (see Brim.cpp).
+        const bool     brim_outer      = brim_type == btOuterOnly || brim_type == btOuterAndInner || brim_type == btLeadingEdgeOnly;
         const bool     brim_inner      = brim_type == btInnerOnly || brim_type == btOuterAndInner;
         // BBS: the pattern of raft and brim are the same, thus the brim can be serpated by support raft.
         const auto     brim_object_gap = scaled<float>(object.config().brim_object_gap.value);
@@ -1202,6 +1204,18 @@ static void modulate_extrusion_by_overlapping_layers(
         // Adjust the extrusion parameters for a reduced layer height and a non-bridging flow (nozzle_dmr = -1, does not matter).
         assert(this_layer.print_z > overlapping_layer.print_z);
         frag.height = float(this_layer.print_z - overlapping_layer.print_z);
+        // ORCA: the assert above is compiled out in a release build, and can
+        // actually be violated -- confirmed via a real belt-printer (tree
+        // support) crash: this_layer/overlapping_layer print_z ended up
+        // equal (or reversed) for a support/interface layer pair, making
+        // frag.height <= 0, which Flow::mm3_per_mm() below then rejects by
+        // throwing (aborting the ENTIRE slice over one degenerate support
+        // fragment). Clamp to a tiny positive height instead: a fragment
+        // this thin contributes negligible material either way, and this
+        // never changes behavior for the (overwhelming majority of) cases
+        // where the ordering assumption already holds.
+        if (frag.height <= 0.f)
+            frag.height = float(EPSILON);
         frag.mm3_per_mm = Flow(frag.width, frag.height, -1.f).mm3_per_mm();
 #ifdef SLIC3R_DEBUG
         svg.draw(frag.polylines, dbg_index_to_color(i_overlapping_layer), scale_(0.1));
@@ -1802,7 +1816,14 @@ void generate_support_toolpaths(
                 bool  sheath  = support_params.with_sheath;
                 bool  no_sort = false;
                 bool  done    = false;
-                if (base_layer.layer->bottom_z < EPSILON) {
+                // Belt printers have no flat bed first layer — the belt is the tilted
+                // build surface — so the dense raft_first_layer_density flange must not
+                // fire anywhere, including the layer at z=0 (the belt-surface line).
+                // (belt_floor_shear_factor is non-zero only when belt_printer is on.)
+                // For every other printer type, support z is never negative, so this
+                // matches the original "first layer at z=0" behaviour unchanged.
+                const bool is_belt_printer = std::abs(slicing_params.belt_floor_shear_factor) > EPSILON;
+                if (! is_belt_printer && base_layer.layer->bottom_z < EPSILON) {
                     // Base flange (the 1st layer).
                     filler = filler_first_layer;
                     filler->angle = Geometry::deg2rad(float(config.support_angle.value + 90.));
