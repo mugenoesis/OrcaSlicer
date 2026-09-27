@@ -2869,6 +2869,17 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
     } else
         plate_printable_bbox.defined = false; //when this is used, the printable area config was missing, something wrong
 
+    // ORCA-DEBUG: temporary diagnostic for the belt bed-bounds remap fix.
+    BOOST_LOG_TRIVIAL(info) << boost::format(
+        "ORCA-DEBUG bounds-check: machine_frame_active=%1% gcode_remap_active=%2% remap_xyz=(%3%,%4%,%5%) "
+        "plate_printable_bbox.defined=%6% bbox=[%7%,%8%]-[%9%,%10%] gcode_path_pos.size=%11%")
+        % machine_frame_active % gcode_remap_active
+        % int(m_gcode_remap_x) % int(m_gcode_remap_y) % int(m_gcode_remap_z)
+        % plate_printable_bbox.defined
+        % unscale<double>(plate_printable_bbox.min.x()) % unscale<double>(plate_printable_bbox.min.y())
+        % unscale<double>(plate_printable_bbox.max.x()) % unscale<double>(plate_printable_bbox.max.y())
+        % gcode_path_pos.size();
+
     for (auto obj_iter = gcode_path_pos.begin(); obj_iter != gcode_path_pos.end(); ++obj_iter) {
         int                                object_label_id = obj_iter->first;
         const std::map<int, GCodePosInfo> &path_pos        = obj_iter->second;
@@ -2879,6 +2890,15 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
             Polygon     path_poly(iter_points);
             if (path_poly.empty()) continue;
             BoundingBox bbox = path_poly.bounding_box();
+            // ORCA-DEBUG: temporary diagnostic for the belt bed-bounds remap fix.
+            BOOST_LOG_TRIVIAL(info) << boost::format(
+                "ORCA-DEBUG bounds-check obj: object_label_id=%1% filament=%2% npoints=%3% "
+                "bbox=[%4%,%5%]-[%6%,%7%] contained=%8% max_print_z=%9%")
+                % object_label_id % iter->first % iter_points.size()
+                % unscale<double>(bbox.min.x()) % unscale<double>(bbox.min.y())
+                % unscale<double>(bbox.max.x()) % unscale<double>(bbox.max.y())
+                % (plate_printable_bbox.defined ? plate_printable_bbox.contains(bbox) : true)
+                % iter->second.max_print_z;
             if (plate_printable_bbox.defined) {
                 if (!plate_printable_bbox.contains(bbox)) { // out of the bed area
                     m_result.gcode_check_result.error_code |= (1<<2);
