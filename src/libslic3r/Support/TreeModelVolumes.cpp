@@ -107,14 +107,41 @@ TreeModelVolumes::TreeModelVolumes(
             if (ctx.is_active()
                 && std::abs(print_object.belt_global_z_offset()) > EPSILON
                 && pcfg.belt_support_floor_mode.value == BeltSupportFloorMode::GeneratorOnly) {
-                size_t num_layers_needed = print_object.layer_count();
-                // Ensure m_anti_overhang is large enough.
+                // m_anti_overhang is indexed in the COMBINED layer space
+                // (belt raft layers first, then real object layers) once
+                // the belt raft layers computed below are prepended to
+                // m_raft_layers/m_layer_outlines -- calculateCollision()/
+                // calculatePlaceables() read `anti_overhang[layer_idx]`
+                // using that combined index. This block used to write at
+                // raw (unshifted) object-layer indices instead, so every
+                // lookup landed on the wrong layer's belt-cutoff polygon by
+                // exactly num_raft_layers (tens of layers, ~10mm here) --
+                // corrupting the belt-floor collision boundary organic
+                // branches check against and leaving them with no valid
+                // path down through the raft region to the real belt.
+                // Mirror the exact num_raft_layers formula used below (and
+                // in generate_support_areas(), which this must stay in
+                // sync with) so both sides agree on the same shift.
+                double bb_min_z          = std::abs(belt_remapped_bbox(*print_object.model_object(), pcfg).min.z());
+                double extra_depth       = bb_min_z + 10.;
+                size_t num_raft_layers   = std::max(0, (int)std::ceil(extra_depth / sp.layer_height));
+
+                size_t num_object_layers = print_object.layer_count();
+                size_t num_layers_needed = num_object_layers + num_raft_layers;
+                // Shift any pre-existing (raw-indexed) content -- e.g. user-
+                // painted support blockers from slice_support_blockers() --
+                // up by num_raft_layers so it lands back on the correct real
+                // object layer in the combined index space, then make room
+                // for the (belt-cutoff-free) raft layers at the front.
+                if (num_raft_layers > 0) {
+                    m_anti_overhang.insert(m_anti_overhang.begin(), num_raft_layers, Polygons{});
+                }
                 if (m_anti_overhang.size() < num_layers_needed)
                     m_anti_overhang.resize(num_layers_needed, Polygons{});
-                for (size_t layer_idx = 0; layer_idx < num_layers_needed; ++layer_idx) {
+                for (size_t layer_idx = 0; layer_idx < num_object_layers; ++layer_idx) {
                     double print_z = print_object.get_layer(layer_idx)->print_z
                                    - print_object.belt_global_z_offset();
-                    append(m_anti_overhang[layer_idx], ctx.surface_polygon(print_z));
+                    append(m_anti_overhang[layer_idx + num_raft_layers], ctx.surface_polygon(print_z));
                 }
             }
         }
