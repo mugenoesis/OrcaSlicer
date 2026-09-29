@@ -138,11 +138,40 @@ TreeModelVolumes::TreeModelVolumes(
                 }
                 if (m_anti_overhang.size() < num_layers_needed)
                     m_anti_overhang.resize(num_layers_needed, Polygons{});
-                for (size_t layer_idx = 0; layer_idx < num_object_layers; ++layer_idx) {
-                    double print_z = print_object.get_layer(layer_idx)->print_z
-                                   - print_object.belt_global_z_offset();
-                    append(m_anti_overhang[layer_idx + num_raft_layers], ctx.surface_polygon(print_z));
-                }
+                // The belt-surface half-plane used to be injected into every
+                // real object layer's anti_overhang here (BeltFloorContext::
+                // surface_polygon(), a ~1000mm "infinite" half-plane per
+                // half_plane()'s own large_bound). That polygon then fed
+                // straight into calculateCollision()'s per-layer sum below
+                // (`append(collisions, offset(union_ex(anti_overhang[layer_idx]),
+                // radius, ...))`), which -- confirmed against a real belt
+                // slice, debug-logged area/bbox at the exact failure site --
+                // ballooned collision at EVERY real layer to ~2,000,000mm^2
+                // (bounded almost exactly by that same ~1000mm half-plane),
+                // ~4x the entire belt bed's maximum possible area. That
+                // contaminated collision then poisons every subsequent
+                // layer's avoidance via calculateAvoidance()'s bottom-up
+                // propagation (each layer's avoidance folds in the one
+                // below), so essentially every to-buildplate branch's
+                // candidate area collapsed to exactly zero for the rest of
+                // the print -- the systemic tree-support branch-
+                // disconnection bug (organic algorithm logs "Potentially
+                // lost branch!" for the same candidates, tens of thousands
+                // of times on a single print).
+                //
+                // This exact protection is redundant for real layers anyway:
+                // m_belt_floor (computed unconditionally for both raft and
+                // real layers just below) is what organic_draw_branches()
+                // actually clips generated branch geometry against post-
+                // generation (see its `diff(slices[i], volumes.m_belt_floor
+                // [belt_idx])` calls in TreeSupport3D.cpp) -- matching this
+                // function's OWN comment at the anti_overhang collision fold
+                // site ("branches should grow toward the belt and terminate
+                // at it, not avoid it. Belt floor clipping is done post-
+                // generation"). Collision-time avoidance was never meant to
+                // carry this concern for real layers; only the raft-layer
+                // resize/shift above (for genuine user-painted support
+                // blockers) needs to happen here.
             }
         }
         TreeSupportMeshGroupSettings mesh_settings(print_object);

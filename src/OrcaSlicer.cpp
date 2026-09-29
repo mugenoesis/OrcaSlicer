@@ -4619,6 +4619,22 @@ int CLI::run(int argc, char **argv)
         ConfigOptionBool *support_opt = m_print_config.option<ConfigOptionBool>("enable_support");
         bool              support_enabled = support_opt && support_opt->value;
         double margin_mm = support_enabled ? 30. : 15.;
+        // arrange_objects/arrange::arrange (Arrangement.cpp) also enforces
+        // its own extruder_clearance_radius keep-out around every object it
+        // places -- a real physical measurement of the toolhead/gantry, not
+        // a tunable like the margin above. If that radius exceeds this
+        // margin, the band this function computes can end up *smaller* than
+        // what arrange itself requires, and arrange reports the whole plate
+        // as unplaceable ("plate is empty or has no object fully inside
+        // it") even though the object comfortably fits the real, uncapped
+        // bed. Confirmed against a real slice (IdeaFormer IR3 V2, whose
+        // profile sets extruder_clearance_radius=65mm): a ~61mm-deep object
+        // failed to arrange inside a margin=30mm capped band (121mm total)
+        // but placed fine once the cap was widened past the clearance
+        // radius. Take whichever of the two is actually larger so neither
+        // constraint gets starved by the other.
+        if (const ConfigOptionFloat *clearance_opt = m_print_config.option<ConfigOptionFloat>("extruder_clearance_radius"); clearance_opt)
+            margin_mm = std::max(margin_mm, clearance_opt->value);
         // Sized so arrange's own centering within this capped band lands a
         // lone object's near edge at min_y + margin_mm: object depth plus
         // margin_mm of clearance on each side, centered => near edge =
