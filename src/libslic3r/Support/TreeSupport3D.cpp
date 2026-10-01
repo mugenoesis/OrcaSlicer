@@ -21,10 +21,12 @@
 #include "MutablePolygon.hpp"
 #include "BeltFloorContext.hpp"
 #include "SupportCommon.hpp"
+#include "TriangleMesh.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TreeSupport.hpp"
 #include "I18N.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <optional>
@@ -3946,7 +3948,7 @@ void organic_draw_branches(
     mesh_slicing_params.mode = MeshSlicingParams::SlicingMode::Positive;
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
-        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &interface_placer, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
+        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &interface_placer, &throw_on_cancel, &print_object](const tbb::blocked_range<size_t> &range) {
             indexed_triangle_set    partial_mesh;
             std::vector<float>      slice_z;
             std::vector<Polygons>   bottom_contacts;
@@ -3956,9 +3958,70 @@ void organic_draw_branches(
                     // Triangulate the tube.
                     partial_mesh.clear();
                     std::pair<float, float> zspan = extrude_branch(branch.path, config, slicing_params, move_bounds, branch.has_root, partial_mesh);
+
+                    // Belt mode: attach a genuine flat pad, lying flush in the
+                    // belt's own (tilted) plane, at this branch's belt-contact
+                    // point. Without this, a belt-terminating root branch has
+                    // no real flat footing -- only whatever crescent-shaped
+                    // sliver survives the belt's per-layer cutoff-line clip
+                    // (see the belt-floor clipping below) -- which is why the
+                    // printed base looks like a standing loop/arch instead of
+                    // a flat foot parallel to the belt. This reverses the
+                    // explicit prior design choice ("no solid support-floor
+                    // pad under these branches", see below) per direct user
+                    // request: a belt-terminating branch should end in a
+                    // flat, belt-parallel pad like a normal tree-support foot
+                    // on any other printer, not taper to a point mid-slice.
+                    double pad_min_z = std::numeric_limits<double>::infinity();
+                    indexed_triangle_set pad_mesh;
+                    bool have_pad = false;
+                    if (branch.has_root && !volumes.m_belt_floor.empty()) {
+                        BeltFloorContext pad_ctx;
+                        if (pad_ctx.init_local(slicing_params, print_object.print()->config(), print_object.belt_global_z_offset())) {
+                            const Point  root_xy       = branch.path.front()->state.result_on_layer;
+                            const double pad_radius    = unscale<double>(support_element_radius(config, *branch.path.front()));
+                            const double pad_thickness = std::max(1.0, 2.0 * unscale<double>(config.layer_height));
+                            const double belt_z        = pad_ctx.floor_print_z(root_xy);
+                            const double shear         = pad_ctx.shear_factor();
+                            const double tilt          = std::atan(shear);
+                            // Outward normal: increasing Z at fixed XY always
+                            // moves away from the belt (floor_print_z's own
+                            // Z-gradient is exactly 1), regardless of the
+                            // sign of shear_factor, so this is always
+                            // correctly oriented into valid/printable space.
+                            const Vec3d normal = pad_ctx.from_axis() == 0
+                                ? Vec3d(-shear, 0., 1.).normalized()
+                                : Vec3d(0., -shear, 1.).normalized();
+                            // Small overlap into the belt so the pad's bottom
+                            // face isn't left exactly tangent (a hairline
+                            // float-precision gap); the belt-floor clip below
+                            // trims it back to the true surface regardless.
+                            constexpr double overlap = 0.1;
+                            const Vec3d center = to_3d(unscaled<double>(root_xy), belt_z) - overlap * normal;
+
+                            pad_mesh = its_make_cylinder(pad_radius, pad_thickness + overlap, 2. * M_PI / 24.);
+                            Transform3d t = Transform3d::Identity();
+                            t.translate(center);
+                            t.rotate(pad_ctx.from_axis() == 0
+                                ? Eigen::AngleAxisd(-tilt, Vec3d::UnitY())
+                                : Eigen::AngleAxisd(tilt, Vec3d::UnitX()));
+                            its_transform(pad_mesh, t);
+                            have_pad = true;
+
+                            // A disc of radius r tilted by `tilt` spans up to
+                            // 2*r*sin(tilt) in Z -- extend the slice range so
+                            // slice_mesh actually samples layers low enough
+                            // to capture the whole pad instead of silently
+                            // truncating it.
+                            pad_min_z = center.z() - pad_radius * std::abs(std::sin(tilt));
+                        }
+                    }
+
                     LayerIndex layer_begin = branch.has_root ?
-                        branch.path.front()->state.layer_idx : 
+                        branch.path.front()->state.layer_idx :
                         std::min(branch.path.front()->state.layer_idx, layer_idx_ceil(slicing_params, config, zspan.first));
+                    if (pad_min_z < std::numeric_limits<double>::infinity())
+                        layer_begin = std::max(LayerIndex(0), std::min(layer_begin, layer_idx_ceil(slicing_params, config, pad_min_z)));
                     LayerIndex layer_end   = (branch.has_tip ?
                         branch.path.back()->state.layer_idx :
                         std::max(branch.path.back()->state.layer_idx, layer_idx_floor(slicing_params, config, zspan.second))) + 1;
@@ -3990,6 +4053,37 @@ void organic_draw_branches(
                         remove_small(slices[i], tiny_area);
                     }
 
+                    // Belt mode: REPLACE (not union) the branch tube's own
+                    // cross-sections with the flat belt-pad's cross-sections,
+                    // wherever the pad exists, sliced and clipped independently
+                    // of the tube above. Unioning was tried first and measured
+                    // to make almost no visible difference: the tube's own
+                    // natural taper already has substantial area at these
+                    // layers (it's just the wrong SHAPE -- a tilted cone-slice,
+                    // not a flat disc), so adding the pad on top of it left the
+                    // combined area essentially unchanged. Replacing the tube's
+                    // material with the pad's for this Z range is what actually
+                    // substitutes the tapering "standing arch" shape with a
+                    // genuine flat foot. The general getCollision() obstacle
+                    // map was precalculated before this pad ever existed and
+                    // does not reflect it, so the pad is clipped only against
+                    // the bed area and the belt surface -- the two constraints
+                    // that actually apply to a flush belt pad.
+                    if (have_pad) {
+                        std::vector<Polygons> pad_slices = slice_mesh(pad_mesh, slice_z, mesh_slicing_params, throw_on_cancel);
+                        for (LayerIndex i = 0; i < LayerIndex(std::min(slices.size(), pad_slices.size())); ++i) {
+                            if (pad_slices[i].empty())
+                                continue;
+                            pad_slices[i] = intersection(pad_slices[i], volumes.m_bed_area, ApplySafetyOffset::Yes);
+                            LayerIndex belt_idx = layer_begin + i;
+                            if (belt_idx < LayerIndex(volumes.m_belt_floor.size()) && !volumes.m_belt_floor[belt_idx].empty())
+                                pad_slices[i] = diff(pad_slices[i], volumes.m_belt_floor[belt_idx]);
+                            remove_small(pad_slices[i], tiny_area);
+                            if (!pad_slices[i].empty())
+                                slices[i] = std::move(pad_slices[i]);
+                        }
+                    }
+
                     size_t num_empty = 0;
 
                     if (slices.front().empty()) {
@@ -4011,7 +4105,18 @@ void organic_draw_branches(
 
                     if (branch.has_root) {
                         if (branch.path.front()->state.to_model_gracious) {
-                            if (config.settings.support_floor_layers > 0) {
+                            // Belt mode: same reasoning as the non-gracious branch below (see its
+                            // comment) -- slice_front_contact here is the first slice that survives
+                            // belt-floor clipping, i.e. whatever crescent-shaped sliver is left just
+                            // as the belt's cutoff line finishes sweeping across this branch's
+                            // cross-section. It is NOT a flat footprint resting on the belt; most of
+                            // it can sit well above the belt at that same print_z, with only its
+                            // edge along the cutoff line actually at belt height. Turning that into a
+                            // solid support-floor/interface contact (the code this used to run
+                            // unconditionally) plants a wrongly-shaped, partially-unsupported patch
+                            // right at the belt. Skip it in belt mode, exactly like the other branch
+                            // already does, and let the branch taper naturally onto the belt instead.
+                            if (volumes.m_belt_floor.empty() && config.settings.support_floor_layers > 0) {
                                 // If bottom Z gap is non-zero, keep bottom contacts even when not touching the model.
                                 Polygons contacts;
 
@@ -4067,29 +4172,28 @@ void organic_draw_branches(
                                 LayerIndex collision_layer = (layer_idx == layer_begin - 1) ? layer_begin : layer_idx;
                                 Polygons collision = volumes.getCollision(0, collision_layer, false);
                                 rest_support = diff_clipped(rest_support.empty() ? slice_front_contact : rest_support, collision, ApplySafetyOffset::Yes);
-                                // Belt floor: clip propagated support at belt surface.
-                                bool belt_cut = false;
-                                if (layer_idx < LayerIndex(volumes.m_belt_floor.size()) && !volumes.m_belt_floor[layer_idx].empty()) {
-                                    double area_before = area(rest_support);
+                                // Belt floor: clip propagated support at belt surface. Keep
+                                // propagating through the belt region instead of stopping at the
+                                // first layer the belt line touches the branch -- the belt line
+                                // only cuts a *cross-section* of the branch (it's the tilted belt
+                                // plane's intersection with this one slicing layer), so the first
+                                // touch removes just a sliver, leaving a large, barely-clipped
+                                // shape as the "contact" that is mostly NOT actually against the
+                                // belt (confirmed visually: only one edge of that shape touches
+                                // the belt line, the rest of it sits above the belt at that same
+                                // print_z). Letting the loop continue lets the branch keep
+                                // narrowing, layer by layer, as the belt line sweeps further
+                                // across it, so it actually converges to a small tip seated at the
+                                // belt -- termination is still bounded by layer_bottommost below
+                                // and by the rest_support_area < support_area_stop check just below.
+                                if (layer_idx < LayerIndex(volumes.m_belt_floor.size()) && !volumes.m_belt_floor[layer_idx].empty())
                                     rest_support = diff(rest_support, volumes.m_belt_floor[layer_idx]);
-                                    // The belt counts as "reached" only when it actually removes part
-                                    // of this branch's footprint. The belt half-plane is non-empty at
-                                    // every near-belt layer, so testing non-emptiness alone would
-                                    // terminate a laterally-distant branch ~1 layer above true contact,
-                                    // leaving a gap. Require a real area reduction instead.
-                                    belt_cut = belt_mode && area(rest_support) < area_before - tiny_area;
-                                }
                                 remove_small(rest_support, tiny_area);
                                 double rest_support_area = area(rest_support);
                                 if (rest_support_area < support_area_stop)
                                     // Don't propagate a fraction of the tree contact surface.
                                     break;
                                 bottom_extra_slices.push_back({ rest_support, rest_support_area });
-                                // Belt mode: once the belt surface actually starts cutting this branch
-                                // it has reached the belt — keep this last (belt-clipped) slice as the
-                                // contact and stop, rather than stamping the footprint further down.
-                                if (belt_cut)
-                                    break;
                             }
                             // Now remove those bottom slices that are not supported at all.
 #if 0
