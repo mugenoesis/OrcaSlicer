@@ -56,6 +56,7 @@ TreeModelVolumes::TreeModelVolumes(
     const PrintObject &print_object,
     const BuildVolume &build_volume,
     const coord_t max_move, const coord_t max_move_slow, size_t current_mesh_idx, 
+    size_t num_belt_raft_layers,
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
     double progress_multiplier, double progress_offset, 
 #endif // SLIC3R_TREESUPPORTS_PROGRESS
@@ -100,13 +101,7 @@ TreeModelVolumes::TreeModelVolumes(
         // in local mode the belt floor clipping handles everything and
         // anti_overhang at the bottom layers would block all support.
         {
-            const auto &sp   = print_object.slicing_parameters();
-            const auto &pcfg = print_object.print()->config();
-            BeltFloorContext ctx;
-            ctx.init_local(sp, pcfg, print_object.belt_global_z_offset());
-            if (ctx.is_active()
-                && std::abs(print_object.belt_global_z_offset()) > EPSILON
-                && pcfg.belt_support_floor_mode.value == BeltSupportFloorMode::GeneratorOnly) {
+            if (const size_t num_raft_layers = num_belt_raft_layers; num_raft_layers > 0) {
                 // m_anti_overhang is indexed in the COMBINED layer space
                 // (belt raft layers first, then real object layers) once
                 // the belt raft layers computed below are prepended to
@@ -119,13 +114,9 @@ TreeModelVolumes::TreeModelVolumes(
                 // corrupting the belt-floor collision boundary organic
                 // branches check against and leaving them with no valid
                 // path down through the raft region to the real belt.
-                // Mirror the exact num_raft_layers formula used below (and
-                // in generate_support_areas(), which this must stay in
-                // sync with) so both sides agree on the same shift.
-                double bb_min_z          = std::abs(belt_remapped_bbox(*print_object.model_object(), pcfg).min.z());
-                double extra_depth       = bb_min_z + 10.;
-                size_t num_raft_layers   = std::max(0, (int)std::ceil(extra_depth / sp.layer_height));
-
+                // num_raft_layers is the same count the caller uses for its own
+                // raft_layers and the m_raft_layers prepend below uses,
+                // so all of them agree on the same shift.
                 size_t num_object_layers = print_object.layer_count();
                 size_t num_layers_needed = num_object_layers + num_raft_layers;
                 // Shift any pre-existing (raw-indexed) content -- e.g. user-
@@ -133,9 +124,7 @@ TreeModelVolumes::TreeModelVolumes(
                 // up by num_raft_layers so it lands back on the correct real
                 // object layer in the combined index space, then make room
                 // for the (belt-cutoff-free) raft layers at the front.
-                if (num_raft_layers > 0) {
-                    m_anti_overhang.insert(m_anti_overhang.begin(), num_raft_layers, Polygons{});
-                }
+                m_anti_overhang.insert(m_anti_overhang.begin(), num_raft_layers, Polygons{});
                 if (m_anti_overhang.size() < num_layers_needed)
                     m_anti_overhang.resize(num_layers_needed, Polygons{});
                 // The belt-surface half-plane used to be injected into every
@@ -185,23 +174,13 @@ TreeModelVolumes::TreeModelVolumes(
         // Belt printer: add virtual belt raft layers below the object, matching
         // the extra layers added in generate_support_areas() so both use the
         // same layer indexing.
-        {
-            const auto &sp2   = print_object.slicing_parameters();
-            const auto &pcfg2 = print_object.print()->config();
-            double belt_sf = sp2.belt_floor_shear_factor;
-            if (std::abs(belt_sf) > EPSILON && std::abs(print_object.belt_global_z_offset()) > EPSILON
-                && pcfg2.belt_support_floor_mode.value == BeltSupportFloorMode::GeneratorOnly) {
-                double bb_min_z    = std::abs(belt_remapped_bbox(*print_object.model_object(), pcfg2).min.z());
-                double extra_depth = bb_min_z + 10.;
-                int    num_extra   = std::max(0, (int)std::ceil(extra_depth / sp2.layer_height));
-                if (num_extra > 0) {
-                    std::vector<coordf_t> belt_layers;
-                    belt_layers.reserve(num_extra);
-                    for (int i = num_extra; i >= 1; --i)
-                        belt_layers.push_back(sp2.first_object_layer_height - i * sp2.layer_height);
-                    m_raft_layers.insert(m_raft_layers.begin(), belt_layers.begin(), belt_layers.end());
-                }
-            }
+        if (num_belt_raft_layers > 0) {
+            const auto &sp2 = print_object.slicing_parameters();
+            std::vector<coordf_t> belt_layers;
+            belt_layers.reserve(num_belt_raft_layers);
+            for (int i = int(num_belt_raft_layers); i >= 1; --i)
+                belt_layers.push_back(sp2.first_object_layer_height - i * sp2.layer_height);
+            m_raft_layers.insert(m_raft_layers.begin(), belt_layers.begin(), belt_layers.end());
         }
         m_current_outline_idx = 0;
 

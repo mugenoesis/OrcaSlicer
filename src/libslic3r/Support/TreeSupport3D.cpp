@@ -3410,14 +3410,46 @@ static void organic_smooth_branches_avoid_collisions(
 }
 #endif // TREE_SUPPORT_ORGANIC_NUDGE_NEW
 
+// Belt mode: how much deeper (mm) the virtual belt raft must reach so that
+// every build-plate root lies wholly below the belt surface -- its whole
+// bottom disc, plus a two-layer margin. Such a branch crosses the belt as a
+// full tube, which the belt-floor clip cuts into a flat foot. A root left
+// above that line ends with its tube in the air (a hovering trunk) or with
+// only its rim touching the belt (a sliver). Branches drift sideways on the
+// way down, so this is measured from the generated tree rather than predicted
+// from the object's footprint. Returns 0 when every root is deep enough.
+static double belt_root_shortfall(const PrintObject &print_object, const TreeSupportSettings &config, const std::vector<SupportElements> &move_bounds)
+{
+    BeltFloorContext ctx;
+    if (move_bounds.empty() || ! ctx.init_local(print_object.slicing_parameters(), print_object.print()->config(), print_object.belt_global_z_offset()))
+        return 0.;
+    const double root_z = layer_z(print_object.slicing_parameters(), config, 0);
+    const double margin = 2. * unscale<double>(config.layer_height);
+    double       shortfall = 0.;
+    for (const SupportElement &root : move_bounds.front()) {
+        if (root.state.deleted || ! root.state.to_buildplate)
+            continue;
+        // The belt floor is a plane tilted along from_axis; across a disc of
+        // radius r it dips |shear| * r below its height at the center.
+        const double radius      = unscale<double>(support_element_radius(config, root));
+        const double lowest_belt = ctx.floor_print_z(root.state.result_on_layer) - std::abs(ctx.shear_factor()) * radius;
+        shortfall = std::max(shortfall, root_z + margin - lowest_belt);
+    }
+    return shortfall;
+}
+
 /*!
  * \brief Create the areas that need support.
  *
  * These areas are stored inside the given SliceDataStorage object.
  * \param storage The data storage where the mesh data is gotten from and
  * where the resulting support areas are stored.
+ * \param belt_extra_depth, belt_attempt Belt mode only: how much deeper than
+ * the default the virtual belt raft goes, and which retry this is (see
+ * belt_root_shortfall()).
  */
-static void generate_support_areas(Print &print, TreeSupport* tree_support, const BuildVolume &build_volume, const std::vector<size_t> &print_object_ids, std::function<void()> throw_on_cancel)
+static void generate_support_areas(Print &print, TreeSupport* tree_support, const BuildVolume &build_volume, const std::vector<size_t> &print_object_ids, std::function<void()> throw_on_cancel,
+                                   double belt_extra_depth = 0., int belt_attempt = 0)
 {
     // Settings with the indexes of meshes that use these settings.
     std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> grouped_meshes = group_meshes(print, print_object_ids);
@@ -3436,33 +3468,17 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
         // Belt printer: add virtual "belt raft" layers below the object so
         // organic branches can extend below the model's first layer and
         // terminate at the belt surface instead of creating a flat base at Z=0.
-        {
-            PrintObject &po = *print.get_object(processing.second.front());
-            const auto &sp  = po.slicing_parameters();
-            const auto &pcfg = po.print()->config();
-            BeltFloorContext ctx;
-            ctx.init_local(sp, pcfg, po.belt_global_z_offset());
-            if (ctx.is_active() && std::abs(po.belt_global_z_offset()) > EPSILON
-                && pcfg.belt_support_floor_mode.value == BeltSupportFloorMode::GeneratorOnly) {
-                // z_shift_local is the belt surface height at Y=0 in local coords.
-                // Extend below the belt so the base expansion and build-plate
-                // termination happen inside the belt region and get clipped.
-                // Use the distance from the pre-shear bbox min Z to the part's
-                // post-shear min Z, plus 10mm for base expansion headroom.
-                double bb_min_z    = std::abs(belt_remapped_bbox(*po.model_object(), pcfg).min.z());
-                double extra_depth = bb_min_z + 10.;
-                int    num_extra     = std::max(0, (int)std::ceil(extra_depth / sp.layer_height));
-                if (num_extra > 0) {
-                    // Insert belt raft layers at the front, from lowest Z to highest.
-                    std::vector<coordf_t> belt_layers;
-                    belt_layers.reserve(num_extra);
-                    for (int i = num_extra; i >= 1; --i)
-                        belt_layers.push_back(sp.first_object_layer_height - i * sp.layer_height);
-                    // Prepend to existing raft_layers (if any).
-                    auto &rl = processing.first.raft_layers;
-                    rl.insert(rl.begin(), belt_layers.begin(), belt_layers.end());
-                }
-            }
+        const size_t num_belt_raft_layers = belt_organic_raft_layer_count(*print.get_object(processing.second.front()), belt_extra_depth);
+        if (num_belt_raft_layers > 0) {
+            const auto &sp = print.get_object(processing.second.front())->slicing_parameters();
+            // Insert belt raft layers at the front, from lowest Z to highest.
+            std::vector<coordf_t> belt_layers;
+            belt_layers.reserve(num_belt_raft_layers);
+            for (int i = int(num_belt_raft_layers); i >= 1; --i)
+                belt_layers.push_back(sp.first_object_layer_height - i * sp.layer_height);
+            // Prepend to existing raft_layers (if any).
+            auto &rl = processing.first.raft_layers;
+            rl.insert(rl.begin(), belt_layers.begin(), belt_layers.end());
         }
         const TreeSupportSettings &config = processing.first;
         BOOST_LOG_TRIVIAL(info) << "Processing support tree mesh group " << counter + 1 << " of " << grouped_meshes.size() << " containing " << grouped_meshes[counter].second.size() << " meshes.";
@@ -3489,6 +3505,7 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
         PrintObject &print_object = *print.get_object(processing.second.front());
         // Generator for model collision, avoidance and internal guide volumes.
         TreeModelVolumes volumes{ print_object, build_volume, config.maximum_move_distance, config.maximum_move_distance_slow, processing.second.front(),
+            num_belt_raft_layers,
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
             m_progress_multiplier, m_progress_offset,
 #endif // SLIC3R_TREESUPPORTS_PROGRESS
@@ -3500,7 +3517,11 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
 #if 1
         // use smart overhang detection
         std::vector<Polygons>        overhangs;
-        tree_support->detect_overhangs();
+        // A belt-raft retry (see belt_root_shortfall() below) reuses the first
+        // attempt's detection: overhangs depend only on the object, and
+        // detect_overhangs() never clears its pointer-keyed overhang_types map.
+        if (belt_attempt == 0)
+            tree_support->detect_overhangs();
         const int       num_raft_layers = int(config.raft_layers.size());
         const int       num_layers = int(print_object.layer_count()) + num_raft_layers;
         overhangs.resize(num_layers);
@@ -3626,6 +3647,26 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
             // ### Set a point in each influence area
             create_nodes_from_area(volumes, config, move_bounds, throw_on_cancel);
             auto t_place = std::chrono::high_resolution_clock::now();
+
+            // Belt mode: if any root ended above the belt, regenerate this
+            // group with a deeper belt raft instead of drawing a trunk that
+            // hovers over (or barely touches) the belt. Nothing has been
+            // written to the print object yet, so abandoning this attempt is
+            // free. Roots can move between attempts, hence re-measuring.
+            if (num_belt_raft_layers > 0) {
+                static constexpr int max_belt_attempts = 4;
+                if (const double shortfall = belt_root_shortfall(print_object, config, move_bounds); shortfall > 0.) {
+                    if (belt_attempt + 1 < max_belt_attempts) {
+                        BOOST_LOG_TRIVIAL(info) << "Tree support: belt raft of " << num_belt_raft_layers << " layers leaves a root "
+                                                << shortfall << "mm short of the belt, regenerating deeper";
+                        generate_support_areas(print, tree_support, build_volume, processing.second, throw_on_cancel,
+                                               belt_extra_depth + shortfall, belt_attempt + 1);
+                        continue;
+                    }
+                    BOOST_LOG_TRIVIAL(warning) << "Tree support: after " << max_belt_attempts << " belt raft depths a root is still "
+                                               << shortfall << "mm short of the belt";
+                }
+            }
 
             // ### draw these points as circles
             // this new function give correct result when raft is also enabled
@@ -3973,6 +4014,7 @@ void organic_draw_branches(
                     // flat, belt-parallel pad like a normal tree-support foot
                     // on any other printer, not taper to a point mid-slice.
                     double pad_min_z = std::numeric_limits<double>::infinity();
+                    double pad_max_z = -std::numeric_limits<double>::infinity();
                     indexed_triangle_set pad_mesh;
                     bool have_pad = false;
                     if (branch.has_root && !volumes.m_belt_floor.empty()) {
@@ -4011,9 +4053,19 @@ void organic_draw_branches(
                             // A disc of radius r tilted by `tilt` spans up to
                             // 2*r*sin(tilt) in Z -- extend the slice range so
                             // slice_mesh actually samples layers low enough
-                            // to capture the whole pad instead of silently
-                            // truncating it.
+                            // (and, via pad_max_z below, high enough) to
+                            // capture the whole pad instead of silently
+                            // truncating it. Confirmed necessary: for most
+                            // root branches, belt_z (this branch's own true
+                            // belt-contact height) sits ABOVE layer_end as
+                            // computed from this segment's own path -- the
+                            // branch's path-finding segment this root belongs
+                            // to simply doesn't reach that high on its own,
+                            // so without extending layer_end the pad is
+                            // computed correctly but has nowhere in the
+                            // sampled range to land.
                             pad_min_z = center.z() - pad_radius * std::abs(std::sin(tilt));
+                            pad_max_z = center.z() + pad_thickness + pad_radius * std::abs(std::sin(tilt));
                         }
                     }
 
@@ -4025,10 +4077,26 @@ void organic_draw_branches(
                     LayerIndex layer_end   = (branch.has_tip ?
                         branch.path.back()->state.layer_idx :
                         std::max(branch.path.back()->state.layer_idx, layer_idx_floor(slicing_params, config, zspan.second))) + 1;
+                    if (pad_max_z > -std::numeric_limits<double>::infinity())
+                        layer_end = std::max(layer_end, layer_idx_floor(slicing_params, config, pad_max_z) + 1);
                     slice_z.clear();
                     for (LayerIndex layer_idx = layer_begin; layer_idx < layer_end; ++ layer_idx) {
                         const double print_z  = layer_z(slicing_params, config, layer_idx);
-                        const double bottom_z = layer_idx > 0 ? layer_z(slicing_params, config, layer_idx - 1) : 0.;
+                        // Belt mode: layer_idx==0 is NOT the real build plate (Z=0) --
+                        // it's the deepest virtual belt-raft layer, which can be many
+                        // mm below true Z=0 (e.g. -9.8mm). Using the hardcoded 0.
+                        // below for "the layer before layer 0" (correct on a normal
+                        // printer, where layer 0 genuinely starts at the bed) creates
+                        // a nonsensical, badly-placed first sample here -- confirmed
+                        // directly: this caused the belt-pad fix above to never
+                        // actually apply at layer index 0 on any root branch, because
+                        // the resulting slice_z[0] (the midpoint of 0 and a deeply
+                        // negative print_z) didn't correspond to where the pad or the
+                        // tube's own geometry actually exists. Estimate one layer_height
+                        // below layer 0's own print_z instead, matching how every other
+                        // layer_idx computes its own "previous" sample.
+                        const double bottom_z = layer_idx > 0 ? layer_z(slicing_params, config, layer_idx - 1)
+                            : (!volumes.m_belt_floor.empty() ? print_z - unscale<double>(config.layer_height) : 0.);
                         slice_z.emplace_back(float(0.5 * (bottom_z + print_z)));
                     }
 

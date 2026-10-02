@@ -40,6 +40,8 @@ public:
     TreeModelVolumes() = default;
     explicit TreeModelVolumes(const PrintObject &print_object, const BuildVolume &build_volume,
         coord_t max_move, coord_t max_move_slow, size_t current_mesh_idx, 
+        // Virtual belt raft layers prepended below the object (belt_organic_raft_layer_count()).
+        size_t num_belt_raft_layers,
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
         double progress_multiplier, 
         double progress_offset, 
