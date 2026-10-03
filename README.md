@@ -1,3 +1,48 @@
+> # About this fork
+>
+> This is a fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) that powers
+> [Trident](https://github.com/mugenoesis/Trident), a self-hosted slicer you run in Docker. The
+> **`headless-orca`** branch is the one Trident builds from. It is kept up to date with upstream `main`
+> (last merged: upstream `70bc02467b`, 2 October 2026), and `main` here simply mirrors upstream.
+>
+> Everything in the desktop app still works as upstream. The additions below are aimed at running the slicer
+> headless (no display) from the command line, and at printing on belt (conveyor) printers.
+>
+> ## What this fork adds
+>
+> **Belt (conveyor) printer support**
+> - A belt-printer mode with the machine-frame shear and axis remap undone in the G-code viewer, an endless-length
+>   bed (`belt_printer_infinite_y`), and a belt purge prism, belt brim and belt-aware G-code writer.
+> - Organic tree supports that grow down to the belt: a virtual raft deep enough that every root ends below the belt,
+>   a flat pad at the belt, and no first-layer expansion on the lowest support layer.
+> - Default placement near the prime line, with the auto-arrange span capped to the belt origin.
+>
+> **Command-line additions** (all usable with `--slice`)
+> - `--help-json`: print every setting as machine-readable JSON.
+> - `--remap-filament-extruder old:new,...`: remap which extruder a file's colours print on (including painted
+>   multi-colour regions), for tool changers such as the Snapmaker U1.
+> - `--keep-positions=1`: keep every object where it is (belt printers otherwise move them to a default spot).
+> - `--belt-shift-y <mm>`: move the belt printer's default placement along the belt.
+>
+> **Fixes found while running headless**
+> - A crash slicing a 3MF that has no `printable_height`.
+> - `filament_count` staying stale when a 3MF is loaded with more filaments than it was saved with.
+> - A crash from a degenerate support fragment (the height is now clamped in the shared `Flow` constructor).
+> - A null guard when generating plate-name textures without a canvas, and several GCC `-Werror` build fixes.
+>
+> ## Using it
+>
+> For most people the easiest way to use these features is [Trident](https://github.com/mugenoesis/Trident),
+> which wraps this slicer in a web UI and publishes a Docker image. To build the slicer yourself, follow the
+> upstream instructions below; to see exactly what changed, compare this branch with upstream `main`.
+>
+> ## License
+>
+> OrcaSlicer is licensed under the **GNU AGPL v3.0**, and so are the changes in this fork. See `LICENSE.txt`.
+> This fork is not affiliated with or endorsed by the OrcaSlicer project.
+
+---
+
 <div align="center">
 
 <picture>
