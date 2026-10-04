@@ -3805,6 +3805,17 @@ bool GLCanvas3D::handle_shortcut(const KeyChord& chord)
         get_gcode_viewer().get_layers_slider()->switch_one_layer_mode();
         m_dirty = true;
         break;
+    case Shortcut::ToggleBeltShowDesigned:
+        // Belt printers: toggle the "show designed" view while previewing belt G-code.
+        if (get_gcode_viewer().is_belt_view()) {
+            get_gcode_viewer().toggle_belt_show_designed();
+            // The designed-view back-transform is baked into the toolpath geometry at load
+            // time, so the toggle only takes visual effect once the preview is re-converted.
+            if (Plater* plater = wxGetApp().plater())
+                plater->refresh_belt_view();
+            m_dirty = true;
+        }
+        break;
     case Shortcut::GoToLayer:
         if (!m_gizmos.is_enabled()) {
             get_gcode_viewer().get_layers_slider()->show_go_to_layer(true);
