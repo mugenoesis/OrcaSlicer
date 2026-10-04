@@ -1,12 +1,26 @@
-> # About this fork
+> # Pseudorca
 >
-> This is a fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) that powers
-> [Trident](https://github.com/mugenoesis/Trident), a self-hosted slicer you run in Docker. The
-> **`headless-orca`** branch is the one Trident builds from. It is kept up to date with upstream `main`
-> (last merged: upstream `70bc02467b`, 2 October 2026), and `main` here simply mirrors upstream.
+> Pseudorca is a fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) that powers
+> [Trident](https://github.com/mugenoesis/Trident), a self-hosted slicer you run in Docker.
+>
+> - **`headless-orca`** (the default branch) is the one Trident builds from. It is kept up to date with upstream
+>   (last merged: upstream `70bc02467b`, 2 October 2026).
+> - **`main`** is never committed to: it only mirrors upstream OrcaSlicer `main`, so it can be synced with one click
+>   and never conflicts.
 >
 > Everything in the desktop app still works as upstream. The additions below are aimed at running the slicer
 > headless (no display) from the command line, and at printing on belt (conveyor) printers.
+>
+> <details>
+> <summary>Keeping up with upstream (for maintainers)</summary>
+>
+> 1. Sync `main`: open the `main` branch on GitHub and press **Sync fork**, or run
+>    `gh repo sync mugenoesis/Pseudorca --branch main`.
+> 2. Merge it into the working branch: `git checkout headless-orca && git fetch origin && git merge origin/main`.
+> 3. Resolve any conflicts (so far just a handful of files around G-code, the CLI and build settings), build, slice a
+>    belt model and a normal model to check the output, then push `headless-orca`.
+>
+> </details>
 >
 > ## What this fork adds
 >
@@ -16,6 +30,7 @@
 > - Organic tree supports that grow down to the belt: a virtual raft deep enough that every root ends below the belt,
 >   a flat pad at the belt, and no first-layer expansion on the lowest support layer.
 > - Default placement near the prime line, with the auto-arrange span capped to the belt origin.
+> - In the desktop G-code preview, press `B` to switch belt G-code between the printed and the designed (upright) view.
 >
 > **Command-line additions** (all usable with `--slice`)
 > - `--help-json`: print every setting as machine-readable JSON.
